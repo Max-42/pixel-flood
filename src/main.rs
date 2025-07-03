@@ -51,7 +51,7 @@ fn solve_challenge(
     socket: &UdpSocket,
     image: &RgbImage,
     challenge: &mut [u8],
-) -> Result<bool, ChallengeError> {
+) -> Result<Option<(u32, u32)>, ChallengeError> {
     if challenge.len() < BYTE_CHALLENGE {
         return Err(ChallengeError::InvalidChallenge);
     }
@@ -63,7 +63,7 @@ fn solve_challenge(
 
     // fast path, if the pixel already is right, do nothing
     if challenge[4..7] == pixel.0 {
-        return Ok(true);
+        return Ok(Some((x.into(), y.into())));
     };
 
     let [r, g, b] = pixel.0;
@@ -78,7 +78,7 @@ fn solve_challenge(
 
     assert_eq!(size, BYTE_CHALLENGE_RESPONSE, "{}", UNLIKELY_UDP_ERROR);
 
-    Ok(false)
+    Ok(None)
 }
 
 fn send_image(path: &str) -> Result<(), Box<dyn Error>> {
@@ -118,7 +118,7 @@ fn send_image(path: &str) -> Result<(), Box<dyn Error>> {
 
     let mut finished_pixels = HashSet::new();
 
-    let backoff = std::time::Duration::from_millis(10);
+    let backoff = std::time::Duration::from_millis(0);
 
     while finished_pixels.len() as u64 != total_pixels {
         for y in 0..height {
@@ -134,14 +134,14 @@ fn send_image(path: &str) -> Result<(), Box<dyn Error>> {
                         Ok(_) => {
                             match solve_challenge(&socket, &rgb, &mut buf) {
                                 // pixel already has the correct value
-                                Ok(true) => {
-                                    finished_pixels.insert((x, y));
+                                Ok(Some(finished_pixel_coordinates)) => {
+                                    finished_pixels.insert(finished_pixel_coordinates);
                                     bar_pixels_done.inc(1);
                                     continue 'pixel_loop;
                                 }
 
                                 // we sent a valid challenge solution, but we don't know if it arrives
-                                Ok(false) => {
+                                Ok(None) => {
                                     bar_packets_sent.inc(1);
                                     continue 'pixel_loop;
                                 }
