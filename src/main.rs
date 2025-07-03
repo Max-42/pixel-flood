@@ -1,5 +1,6 @@
 use image::GenericImageView;
 use image::RgbImage;
+use image::RgbaImage;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::collections::HashSet;
 use std::error::Error;
@@ -49,7 +50,7 @@ enum ChallengeError {
 /// Respond to a server challenge
 fn solve_challenge(
     socket: &UdpSocket,
-    image: &RgbImage,
+    image: &RgbaImage,
     challenge: &mut [u8],
 ) -> Result<Option<(u32, u32)>, ChallengeError> {
     if challenge.len() < BYTE_CHALLENGE {
@@ -61,12 +62,19 @@ fn solve_challenge(
 
     let pixel = image.get_pixel(x.into(), y.into());
 
-    // fast path, if the pixel already is right, do nothing
-    if challenge[4..7] == pixel.0 {
-        return Ok(Some((x.into(), y.into())));
-    };
+    let [r, g, b, a] = pixel.0;
 
-    let [r, g, b] = pixel.0;
+    // fast path, if the pixel already is right, do nothing
+    if challenge[4..7] == [r, g, b] {
+        return Ok(Some((x.into(), y.into())));
+    }
+
+    let [r, g, b, a] = pixel.0;
+
+    // Skip transparent pixels
+    if a == 0 {
+        return Ok(Some((x.into(), y.into())));
+    }
 
     let difficulty = challenge[7];
 
@@ -82,9 +90,9 @@ fn solve_challenge(
 }
 
 fn send_image(path: &str) -> Result<(), Box<dyn Error>> {
-    // open image,  convert to rgb8, get its dimensions
+    // open image,  convert to rgba8, get its dimensions
     let img = image::open(path).expect("Failed to open image");
-    let rgb = img.to_rgb8();
+    let rgba = img.to_rgba8();
     let (width, height) = img.dimensions();
 
     // bind to network socket
@@ -128,11 +136,19 @@ fn send_image(path: &str) -> Result<(), Box<dyn Error>> {
                     continue;
                 }
 
+                // skip transparent pixels
+                let alpha = rgba.get_pixel(x, y)[3];
+                if alpha == 0 {
+                    finished_pixels.insert((x, y));
+                    bar_pixels_done.inc(1);
+                    continue;
+                }
+
                 // is there an response to be made? If yes, respond!
                 'udp_receive_loop: loop {
                     match socket.recv(&mut buf) {
                         Ok(_) => {
-                            match solve_challenge(&socket, &rgb, &mut buf) {
+                            match solve_challenge(&socket, &rgba, &mut buf) {
                                 // pixel already has the correct value
                                 Ok(Some(finished_pixel_coordinates)) => {
                                     finished_pixels.insert(finished_pixel_coordinates);
