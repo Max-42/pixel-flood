@@ -1,0 +1,19 @@
+[package]
+name = "max-image_sender"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+image = "0.25.0"
+rand = "0.8"
+sha2 = "0.10"
+opencl3 = "0.6"
+rayon = "1.10.0"
+
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "hash"
+harness = false
