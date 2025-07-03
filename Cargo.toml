@@ -10,6 +10,7 @@ sha2 = "0.10"
 opencl3 = "0.6"
 rayon = "1.10.0"
 indicatif = "0.17.11"
+thiserror = "2.0.12"
 
 
 [dev-dependencies]
