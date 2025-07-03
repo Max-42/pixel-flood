@@ -9,11 +9,12 @@ rand = "0.8"
 sha2 = "0.10"
 opencl3 = "0.6"
 rayon = "1.10.0"
+indicatif = "0.17.11"
 
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 
-[[bench]]
-name = "hash"
-harness = false
+# [[bench]]
+# name = "hash"
+# harness = false
