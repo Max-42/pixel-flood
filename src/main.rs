@@ -1,35 +1,25 @@
 use image::GenericImageView;
-use image::RgbImage;
 use image::RgbaImage;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use socket2::SockRef;
+use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::HashSet;
 use std::error::Error;
 use std::io::ErrorKind;
-use std::net::UdpSocket;
-use std::{env, net::Ipv4Addr};
+use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use std::{env, thread, time::Duration};
 
 use ::max_image_sender::solve_pow_parallel;
 
 const UNLIKELY_UDP_ERROR: &str = "unlikely error: UDP socket's send() reports fewer bytes to be sent than in the input datagram. This should never happen for input datagrams below 64KiB";
-
-/// Size of a pixel request, consits of two u16 = 4 byte
 const BYTE_PIXEL_REQUEST: usize = 4;
-
-/// Size of a challange from the server
 const BYTE_CHALLENGE: usize = 24;
-
-/// Size of a challenge response to the server
 const BYTE_CHALLENGE_RESPONSE: usize = 43;
-
-/// Size of the nonce
 const BYTE_NONCE: usize = 16;
 
-/// Ask server for the challenge for given coordinates
 fn send_request(socket: &UdpSocket, x: u32, y: u32) -> Result<(), std::io::Error> {
     let mut buf = [0u8; BYTE_PIXEL_REQUEST];
-
     let (x, y) = (x as u16, y as u16);
-
     buf[0..2].copy_from_slice(&x.to_le_bytes());
     buf[2..4].copy_from_slice(&y.to_le_bytes());
 
@@ -47,7 +37,6 @@ enum ChallengeError {
     NetworkError(#[from] std::io::Error),
 }
 
-/// Respond to a server challenge
 fn solve_challenge(
     socket: &UdpSocket,
     image: &RgbaImage,
@@ -59,19 +48,14 @@ fn solve_challenge(
 
     let x = u16::from_le_bytes(challenge[0..2].try_into().unwrap());
     let y = u16::from_le_bytes(challenge[2..4].try_into().unwrap());
-
     let pixel = image.get_pixel(x.into(), y.into());
 
     let [r, g, b, a] = pixel.0;
 
-    // fast path, if the pixel already is right, do nothing
     if challenge[4..7] == [r, g, b] {
         return Ok(Some((x.into(), y.into())));
     }
 
-    let [r, g, b, a] = pixel.0;
-
-    // Skip transparent pixels
     if a == 0 {
         return Ok(Some((x.into(), y.into())));
     }
@@ -83,31 +67,34 @@ fn solve_challenge(
     challenge[BYTE_CHALLENGE + BYTE_NONCE..BYTE_CHALLENGE_RESPONSE].copy_from_slice(&[r, g, b]);
 
     let size = socket.send(challenge)?;
-
     assert_eq!(size, BYTE_CHALLENGE_RESPONSE, "{}", UNLIKELY_UDP_ERROR);
 
     Ok(None)
 }
 
 fn send_image(path: &str) -> Result<(), Box<dyn Error>> {
-    // open image,  convert to rgba8, get its dimensions
     let img = image::open(path).expect("Failed to open image");
     let rgba = img.to_rgba8();
     let (width, height) = img.dimensions();
 
-    // bind to network socket
-    let server = "172.29.165.125:8080";
-    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).expect("Failed to bind socket");
-    socket.connect(server)?;
+    let server_addr = "172.29.165.125:8080";
+    let server: SocketAddr = server_addr.parse()?;
 
+    // Use socket2 to configure buffer sizes
+    let socket2 = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+    socket2.set_send_buffer_size(64 * 1024 * 1024)?;
+    socket2.set_recv_buffer_size(64 * 1024 * 1024)?;
+    socket2.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)).into())?;
+
+    // Convert back to std::net::UdpSocket
+    let socket: UdpSocket = socket2.into();
+    socket.connect(server)?;
     socket.set_nonblocking(true)?;
 
-    // send the image
     let mut buf = [0u8; BYTE_CHALLENGE_RESPONSE];
     let total_pixels = height as u64 * width as u64;
 
     let mp = MultiProgress::new();
-
     let style = ProgressStyle::with_template("[{elapsed_precise}] {bar:40} {pos:>7}/{len:7} {msg}")
         .unwrap()
         .progress_chars("##-");
@@ -125,99 +112,70 @@ fn send_image(path: &str) -> Result<(), Box<dyn Error>> {
     );
 
     let mut finished_pixels = HashSet::new();
-
-    let backoff = std::time::Duration::from_millis(0);
+    let backoff = Duration::from_millis(0);
 
     while finished_pixels.len() as u64 != total_pixels {
         for y in 0..height {
             'pixel_loop: for x in 0..width {
-                // if this pixel is known good, skip it
                 if finished_pixels.contains(&(x, y)) {
                     continue;
                 }
 
-                // skip pixels outside of the screen
                 if x >= 384 || y >= 256 {
                     finished_pixels.insert((x, y));
                     bar_pixels_done.inc(1);
                     continue;
                 }
 
-                // skip transparent pixels
-                let alpha = rgba.get_pixel(x, y)[3];
-                if alpha == 0 {
+                if rgba.get_pixel(x, y)[3] == 0 {
                     finished_pixels.insert((x, y));
                     bar_pixels_done.inc(1);
                     continue;
                 }
 
-                // is there an response to be made? If yes, respond!
                 'udp_receive_loop: loop {
                     match socket.recv(&mut buf) {
-                        Ok(_) => {
-                            match solve_challenge(&socket, &rgba, &mut buf) {
-                                // pixel already has the correct value
-                                Ok(Some(finished_pixel_coordinates)) => {
-                                    finished_pixels.insert(finished_pixel_coordinates);
-                                    bar_pixels_done.inc(1);
-                                    continue 'pixel_loop;
-                                }
-
-                                // we sent a valid challenge solution, but we don't know if it arrives
-                                Ok(None) => {
-                                    bar_packets_sent.inc(1);
-                                    continue 'pixel_loop;
-                                }
-
-                                // if we saturate the net, lets backoff a bit
-                                Err(ChallengeError::NetworkError(e))
-                                    if e.kind() == ErrorKind::WouldBlock =>
-                                {
-                                    std::thread::sleep(backoff);
-                                }
-
-                                // we failed to sent a challenge solution
-                                Err(e) => {
-                                    bar_packets_sent.inc(1);
-                                    println!("an error occured sending a solution: {e:?}");
-                                }
+                        Ok(_) => match solve_challenge(&socket, &rgba, &mut buf) {
+                            Ok(Some(coords)) => {
+                                finished_pixels.insert(coords);
+                                bar_pixels_done.inc(1);
+                                continue 'pixel_loop;
                             }
-                        }
-
-                        // we don't care if this recv would block
+                            Ok(None) => {
+                                bar_packets_sent.inc(1);
+                                continue 'pixel_loop;
+                            }
+                            Err(ChallengeError::NetworkError(e))
+                                if e.kind() == ErrorKind::WouldBlock =>
+                            {
+                                thread::sleep(backoff);
+                            }
+                            Err(e) => {
+                                bar_packets_sent.inc(1);
+                                println!("Error sending solution: {e:?}");
+                            }
+                        },
                         Err(e) if e.kind() == ErrorKind::WouldBlock => break 'udp_receive_loop,
-
-                        // we do care for other errors
-                        Err(e) => {
-                            println!("an error occured receiving: {e:?}")
-                        }
+                        Err(e) => println!("Recv error: {e:?}"),
                     }
                 }
 
                 match send_request(&socket, x, y) {
                     Ok(_) => {}
-
-                    // we don't care if this recv would block
                     Err(e) if e.kind() == ErrorKind::WouldBlock => continue,
-
-                    // we don't care if we saturate the network
                     Err(e) if e.kind() == ErrorKind::ResourceBusy => {
-                        std::thread::sleep(backoff);
+                        thread::sleep(backoff);
                         continue;
                     }
-
-                    // we do care for other errors
-                    Err(e) => {
-                        println!("an error occured sending request: {e}")
-                    }
+                    Err(e) => println!("Error sending request: {e}"),
                 }
+
                 bar_packets_sent.inc(1);
             }
         }
     }
 
     bar_pixels_done.finish();
-
     Ok(())
 }
 
