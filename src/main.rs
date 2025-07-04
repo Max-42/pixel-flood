@@ -111,68 +111,73 @@ fn send_image(path: &str) -> Result<(), Box<dyn Error>> {
             .with_style(style.clone()),
     );
 
-    let mut finished_pixels = HashSet::new();
-    let backoff = Duration::from_millis(0);
+    let backoff = Duration::from_millis(1);
 
-    while finished_pixels.len() as u64 != total_pixels {
-        for y in 0..height {
-            'pixel_loop: for x in 0..width {
-                if finished_pixels.contains(&(x, y)) {
-                    continue;
-                }
+    let mut pixels_missing: HashSet<(u32, u32)> = (0..width )
+        .into_iter()
+        .flat_map(|x| (0..height ).into_iter().map(move |y| (x.clone(), y)))
+        .collect();
 
-                if x >= 384 || y >= 256 {
-                    finished_pixels.insert((x, y));
-                    bar_pixels_done.inc(1);
-                    continue;
-                }
-
-                if rgba.get_pixel(x, y)[3] == 0 {
-                    finished_pixels.insert((x, y));
-                    bar_pixels_done.inc(1);
-                    continue;
-                }
-
-                'udp_receive_loop: loop {
-                    match socket.recv(&mut buf) {
-                        Ok(_) => match solve_challenge(&socket, &rgba, &mut buf) {
-                            Ok(Some(coords)) => {
-                                finished_pixels.insert(coords);
-                                bar_pixels_done.inc(1);
-                                continue 'pixel_loop;
-                            }
-                            Ok(None) => {
-                                bar_packets_sent.inc(1);
-                                continue 'pixel_loop;
-                            }
-                            Err(ChallengeError::NetworkError(e))
-                                if e.kind() == ErrorKind::WouldBlock =>
-                            {
-                                thread::sleep(backoff);
-                            }
-                            Err(e) => {
-                                bar_packets_sent.inc(1);
-                                println!("Error sending solution: {e:?}");
-                            }
-                        },
-                        Err(e) if e.kind() == ErrorKind::WouldBlock => break 'udp_receive_loop,
-                        Err(e) => println!("Recv error: {e:?}"),
-                    }
-                }
-
-                match send_request(&socket, x, y) {
-                    Ok(_) => {}
-                    Err(e) if e.kind() == ErrorKind::WouldBlock => continue,
-                    Err(e) if e.kind() == ErrorKind::ResourceBusy => {
-                        thread::sleep(backoff);
-                        continue;
-                    }
-                    Err(e) => println!("Error sending request: {e}"),
-                }
-
-                bar_packets_sent.inc(1);
+    while  !pixels_missing.is_empty() {
+        let mut finished_pixels = HashSet::new();
+        'pixel_loop: for (x, y) in pixels_missing.iter().cloned() {
+            if finished_pixels.contains(&(x, y)) {
+                continue;
             }
+
+            if x >= 384 || y >= 256 {
+                finished_pixels.insert((x, y));
+                bar_pixels_done.inc(1);
+                continue;
+            }
+
+            if rgba.get_pixel(x, y)[3] == 0 {
+                finished_pixels.insert((x, y));
+                bar_pixels_done.inc(1);
+                continue;
+            }
+
+            'udp_receive_loop: loop {
+                match socket.recv(&mut buf) {
+                    Ok(_) => match solve_challenge(&socket, &rgba, &mut buf) {
+                        Ok(Some(coords)) => {
+                            finished_pixels.insert(coords);
+                            bar_pixels_done.inc(1);
+                            continue 'pixel_loop;
+                        }
+                        Ok(None) => {
+                            bar_packets_sent.inc(1);
+                            continue 'pixel_loop;
+                        }
+                        Err(ChallengeError::NetworkError(e))
+                            if e.kind() == ErrorKind::WouldBlock =>
+                        {
+                            thread::sleep(backoff);
+                        }
+                        Err(e) => {
+                            bar_packets_sent.inc(1);
+                            println!("Error sending solution: {e:?}");
+                        }
+                    },
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => break 'udp_receive_loop,
+                    Err(e) => println!("Recv error: {e:?}"),
+                }
+            }
+
+            match send_request(&socket, x, y) {
+                Ok(_) => {}
+                Err(e) if e.kind() == ErrorKind::WouldBlock => continue,
+                Err(e) if e.kind() == ErrorKind::ResourceBusy => {
+                    thread::sleep(backoff);
+                    continue;
+                }
+                Err(e) => println!("Error sending request: {e}"),
+            }
+
+            bar_packets_sent.inc(1);
         }
+
+        pixels_missing = pixels_missing.difference(&finished_pixels).map(|(x, y)| (*x, *y)).collect();
     }
 
     bar_pixels_done.finish();
