@@ -136,6 +136,13 @@ fn send_image(path: &str) -> Result<(), Box<dyn Error>> {
                     continue;
                 }
 
+                // skip pixels outside of the screen
+                if x >= 384 || y >= 256 {
+                    finished_pixels.insert((x, y));
+                    bar_pixels_done.inc(1);
+                    continue;
+                }
+
                 // skip transparent pixels
                 let alpha = rgba.get_pixel(x, y)[3];
                 if alpha == 0 {
