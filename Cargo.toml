@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 image = "0.25.0"
-rand = "0.8"
+rand = "0.9"
 sha2 = "0.10"
 opencl3 = "0.6"
 rayon = "1.10.0"
